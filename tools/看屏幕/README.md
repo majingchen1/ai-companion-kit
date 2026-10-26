@@ -19,21 +19,34 @@
 
 ---
 
-## 三步跑起来
+## 怎么跑
+
+**就一步：双击 `开始.bat`。**
 
 ```
-1. 双击 安装.bat     装依赖（第一次要下 100 MB 模型）
-2. 双击 启动.bat     开一个黑窗口，最小化就行
-3. 看 ocr.json      每次识别会刷新
+第一次：自动装依赖（约 100 MB，慢一点）
+以后：  直接开始识别
 ```
 
-要停：关掉那个黑窗口，或者按 `Ctrl+C`。
+它会自己做完三件事：
+
+```
+[1/3] 找 Python（PATH 里没有就翻常见安装位置）
+[2/3] 检查依赖（没有就自动装，三个镜像轮着试）
+[3/3] 开始识别
+```
+
+**前提：你机器上得有 Python 3.10 以上。**
+
+没有的话它会告诉你去哪下，装的时候**记得勾 `Add Python to PATH`**。
+
+要停：关掉那个黑窗口，或者 `Ctrl+C`。
 
 ---
 
 ## 产物
 
-`ocr.json`：
+**`ocr.json`** —— 别的程序读它就能「看见」：
 
 ```json
 {
@@ -46,7 +59,7 @@
 }
 ```
 
-`latest.jpg` 是刚才截的那张图，调试用。
+**`latest.jpg`** —— 刚才截的那张图，调试用。
 
 ---
 
@@ -77,7 +90,7 @@ function readScreen() {
 Python 侧同理：
 
 ```python
-import json, time, os
+import json, time
 
 def read_screen(path='ocr.json', max_age=30):
     try:
@@ -101,9 +114,9 @@ def read_screen(path='ocr.json', max_age=30):
 
 「小鲸鱼」可能认成「小辣鱼」，「暴喵AI管家」认成「暴道AI管」。**不影响理解大意，但别指望逐字准确。**
 
-**③ OCR 比截图慢**
+**③ 实际是每 8~10 秒一次，不是 2 秒**
 
-截图 0.1 秒，认字要 5~8 秒。所以实际是每 8~10 秒一次，不是 2 秒。
+截图 0.1 秒，认字要 5~8 秒。`INTERVAL` 只控制两次识别之间歇多久。
 
 想快就调小 `MAX_LINES`——认的字少了就快。
 
@@ -112,7 +125,7 @@ def read_screen(path='ocr.json', max_age=30):
 ## 要求
 
 - Windows 10 / 11
-- Python 3.10 以上
+- **Python 3.10 以上**（脚本会自己找）
 - 第一次装依赖要联网（约 100 MB）
 - **不需要 ffmpeg**——截屏用 Pillow 自带的 `ImageGrab`
 
@@ -138,8 +151,7 @@ def read_screen(path='ocr.json', max_age=30):
 ## 文件
 
 ```
-安装.bat           装依赖
-启动.bat           开始跑
+开始.bat           双击这个就行（找 Python → 装依赖 → 开跑）
 screen_ocr.py      主程序
 接进你的bot.md     接入代码示例
 说明.txt           给最终用户看的简版
