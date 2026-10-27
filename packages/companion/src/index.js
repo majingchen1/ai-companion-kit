@@ -26,6 +26,8 @@ import { Humanizer } from './humanize.js';
 import { SendGate } from './send-gate.js';
 import { loadImages } from './media.js';
 import { WebSearch } from './web-search.js';
+import { GroupLog } from './group-log.js';
+import { attachQuotes, contextForwardIds, contextImageRefs, expandForwards } from './turn-context.js';
 import { Waker } from './wake.js';
 import { OneBot } from './transport-onebot.js';
 
@@ -88,6 +90,36 @@ export function loadConfig(explicitPath) {
       maxResults: cfg.webSearch?.maxResults ?? 6,
       timeoutMs: cfg.webSearch?.timeoutMs ?? 30000,
     },
+    // 群聊前文：白名单群里的消息在内存里留一段，被 @ 时当前文给模型
+    groupContext: {
+      maxMessages: cfg.groupContext?.maxMessages ?? 30,     // 每个群在内存里留几条
+      historyCount: cfg.groupContext?.historyCount ?? 15,   // 被 @ 时带几条当前文（越多越费 token）
+      maxAgeMinutes: cfg.groupContext?.maxAgeMinutes ?? 30, // 多久以前的不算前文
+      // 有人说「上面那张图」、这一轮自己又没带图时，从前文里找最近的图给模型看
+      images: {
+        enabled: cfg.groupContext?.images?.enabled !== false,
+        keywords: cfg.groupContext?.images?.keywords || ['图', '照片', '截图', '表情包', '这张', '那张'],
+        lookback: cfg.groupContext?.images?.lookback ?? 10,  // 往前看几条消息
+        maxCount: cfg.groupContext?.images?.maxCount ?? 1,   // 最多带几张
+      },
+    },
+    // 引用（QQ 的「回复」）：取出被引用的原文拼进这句话，私聊群聊都管用
+    quote: {
+      enabled: cfg.quote?.enabled !== false,
+      maxChars: cfg.quote?.maxChars ?? 300,       // 引用原文最多带多少字
+      images: cfg.quote?.images !== false,        // 被引用消息里的图也给模型看
+    },
+    // 聊天记录（合并转发）：展开成一条条「谁：说了什么」给模型看，私聊群聊都管用
+    forward: {
+      enabled: cfg.forward?.enabled !== false,
+      maxMessages: cfg.forward?.maxMessages ?? 50,   // 每段最多展开几条
+      maxChars: cfg.forward?.maxChars ?? 3000,       // 每段最多多少字（越多越费 token）
+      depth: cfg.forward?.depth ?? 1,                // 聊天记录里套的聊天记录再展开几层
+      images: cfg.forward?.images !== false,         // 里面的图也给模型看（和这一轮其他图一起最多 images.maxCount 张）
+      // 有人说「上面的聊天记录」、这一轮又没带时，从群前文最近 lookback 条里找；句子里有 keywords 里的词才找
+      keywords: cfg.forward?.keywords || ['聊天记录', '转发'],
+      lookback: cfg.forward?.lookback ?? 10,
+    },
     // 发送限频 + 熔断（教程第十三章：别调高）
     send: {
       perMinute: cfg.send?.perMinute ?? 6,
@@ -101,6 +133,8 @@ export function loadConfig(explicitPath) {
       timeoutMs: cfg.memoryService?.timeoutMs ?? 8000,
       // 模型自己查记忆最多几轮（agentic RAG）；0 = 只用每轮的自动检索
       maxToolRounds: cfg.memoryService?.maxToolRounds ?? 3,
+      // 群聊也记：每个群一份，和私聊分开；false = 只记私聊
+      groupMemory: cfg.memoryService?.groupMemory !== false,
     },
     dryRun: process.argv.includes('--dry-run'),
   };
@@ -118,7 +152,9 @@ async function main() {
   console.log('  OneBot    ' + cfg.onebot.wsUrl);
   console.log('  名字      ' + (cfg.names.join(' / ') || '（没配）'));
   console.log('  主人      ' + (cfg.ownerIds.join(', ') || '（没配）'));
-  console.log('  长期记忆  ' + (cfg.memoryService.url ? cfg.memoryService.url + '（私聊）' : '（没配，只用本地账本）'));
+  console.log('  长期记忆  ' + (cfg.memoryService.url
+    ? cfg.memoryService.url + (cfg.memoryService.groupMemory ? '（私聊 + 每个群各一份）' : '（只记私聊）')
+    : '（没配，只用本地账本）'));
   console.log('  联网搜索  ' + (cfg.webSearch.enabled ? cfg.webSearch.model + ' @ ' + cfg.webSearch.baseUrl : '（没开）'));
   console.log('  干跑      ' + (cfg.dryRun ? '是（不会真发）' : '否'));
   console.log('');
@@ -149,9 +185,12 @@ async function main() {
     ? new WebSearch({ ...cfg.webSearch, apiKey: cfg.webSearch.apiKey || cfg.apiKey })
     : null;
   const brain = new Brain({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, role, memory, remote,
+                            groupMemory: cfg.memoryService.groupMemory,
                             maxToolRounds: cfg.memoryService.maxToolRounds, webSearch });
   const human = new Humanizer(cfg.humanize);
   const gate = new SendGate(cfg.send);
+  const groupLog = new GroupLog({ maxPerGroup: cfg.groupContext.maxMessages,
+                                  maxAgeMs: cfg.groupContext.maxAgeMinutes * 60000 });
   const waker = new Waker({
     names: cfg.names,
     keywords: cfg.keywords,
@@ -171,6 +210,13 @@ async function main() {
 
       const verdict = waker.shouldWake(msg);
       const allowed = groupAllowed(msg, cfg);
+      // 白名单群里的每条都留一小段，被 @ 时当前文（只在内存里）
+      // 私聊也记（只记会理的人）：只用来在追问时找回上一轮的图 / 聊天记录，私聊的前文由记忆服务给
+      const logIt = msg.isGroup ? allowed : (!cfg.wake.privateOwnerOnly || cfg.ownerIds.includes(String(msg.userId)));
+      if (logIt) {
+        groupLog.add(msg.key, { text: (msg.name || msg.userId) + '：' + msg.text, ref: msg,
+                                name: msg.name || msg.userId, images: msg.images, forwards: msg.forwards });
+      }
       // 主人兜底必回；但群里「只回 @」时主人也一样，不然主人在群里每句都接；白名单外的群主人也不例外
       const isOwner = cfg.ownerIds.includes(msg.userId) && allowed && !(msg.isGroup && cfg.wake.groupAtOnly);
       if (!verdict.wake && !isOwner) {
@@ -188,7 +234,7 @@ async function main() {
       pending.set(msg.key, setTimeout(() => {
         const items = waker.flush(msg.key);
         if (!items.length) return;
-        handleTurn({ bot, brain, human, memory, waker, gate }, items, cfg)
+        handleTurn({ bot, brain, human, memory, waker, gate, groupLog }, items, cfg)
           .catch((e) => console.error('[出错] ' + (e?.message || e)));
       }, win));
     },
@@ -257,18 +303,56 @@ export function buildSituation(items, cfg) {
 }
 
 /** 处理一轮（可能是合并后的多条） */
-export async function handleTurn({ bot, brain, human, memory, waker, gate = new SendGate() }, items, cfg) {
+export async function handleTurn({ bot, brain, human, memory, waker, gate = new SendGate(), groupLog = null }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
-  const text = Waker.joinBatch(items);
+  // 引用了别的消息：把原文拼进来，不然模型只看到「你觉得呢」
+  const quoted = cfg.quote?.enabled && bot.getMsg
+    ? await attachQuotes(items, (id) => bot.getMsg(id), { selfId: bot.selfId, ...cfg.quote })
+    : { items, images: [] };
+  let turnItems = quoted.items;
+  if (turnItems.some((m, i) => m !== items[i])) console.log('   引用：' + Waker.joinBatch(turnItems).slice(0, 80));
+
+  // 聊天记录（合并转发）：这一轮带的、引用的；都没有、又在说「上面的聊天记录」时，从群前文里找最近的一段
+  const fw = cfg.forward;
+  if (fw?.enabled && groupLog && !turnItems.some((m) => m.forwards?.length)) {
+    const ids = contextForwardIds(Waker.joinBatch(turnItems), groupLog, key, { exclude: items, ...fw });
+    if (ids.length) turnItems = [...turnItems.slice(0, -1), { ...turnItems.at(-1), forwards: ids }];
+  }
+  // 进长期记忆的这句话不带展开的聊天记录：那是别人之间的对话，抽出来全是张冠李戴的噪音
+  const memoryText = Waker.joinBatch(turnItems);
+  const expanded = fw?.enabled && bot.getForward
+    ? await expandForwards(turnItems, (id) => bot.getForward(id, { depth: fw.depth }), fw)
+    : { items: turnItems, images: [] };
+  let text = Waker.joinBatch(expanded.items);
+  if (text !== memoryText) console.log('   聊天记录：展开了 ' + (text.length - memoryText.length) + ' 字');
 
   const situation = buildSituation(items, cfg);
 
-  const images = cfg.images.enabled
-    ? await loadImages(items.flatMap((m) => m.images || []), { api: (a, p) => bot.api(a, p), ...cfg.images })
+  // 图：这一轮自己带的 + 引用里的 + 聊天记录里的；都没有、又在说「上面那张图」时，从群前文里找
+  let refs = [...items.flatMap((m) => m.images || []), ...quoted.images, ...expanded.images];
+  const ctxImg = cfg.groupContext?.images;
+  if (cfg.images.enabled && !refs.length && groupLog && ctxImg?.enabled) {
+    // 关键词只看这句话本身，不看展开的聊天记录（里面随便一句「地图」就会误触发）
+    const found = contextImageRefs(memoryText, groupLog, key, { exclude: items, ...ctxImg });
+    if (found.refs.length) {
+      refs = found.refs;
+      text += '\n（附上了前文里 ' + [...new Set(found.from)].join('、') + ' 发的图）';
+    }
+  }
+  const images = cfg.images.enabled && refs.length
+    ? await loadImages(refs, { api: (a, p) => bot.api(a, p), ...cfg.images })
     : [];
   if (images.length) console.log('   看图：' + images.length + ' 张');
-  const { text: out, toolCalls } = await brain.reply({ key, userId: last.userId, userName: last.name, text, situation, images });
+  // 这一轮给模型看过的图和聊天记录挂到这条消息上，下一句追问（「@它 截图意见」）还能从前文找回来
+  groupLog?.attach(key, last, { images: images.length ? refs.slice(0, images.length) : [],
+                                forwards: turnItems.flatMap((m) => m.forwards || []) });
+  // 群里：被 @ 之前大家在聊什么（不含这一轮合并的那几条）
+  const history = last.isGroup && groupLog
+    ? groupLog.recent(key, { exclude: items, n: cfg.groupContext?.historyCount ?? 15 })
+    : [];
+  const { text: out, toolCalls } = await brain.reply({ key, userId: last.userId, userName: last.name, text, memoryText,
+                                                       situation, images, history });
   if (toolCalls?.length) {
     console.log('   查记忆：' + toolCalls.map((c) => c.name + '(' + Object.values(c.args).join(', ') + ')').join(' → '));
   }
@@ -295,6 +379,7 @@ export async function handleTurn({ bot, brain, human, memory, waker, gate = new 
     if (!sent.length) return;
   }
   console.log('   发出 ' + sent.length + ' 条：' + sent.map((p) => p.slice(0, 18)).join(' | '));
+  if (last.isGroup && groupLog) groupLog.add(key, { text: sent.join('\n'), isSelf: true });
   waker.wake(key);
   memory.touch(last.userId, { name: last.name });
 }

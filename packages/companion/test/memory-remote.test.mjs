@@ -79,10 +79,27 @@ test('私聊：注入记忆、带上历史、回复后写回', async () => {
   } finally { t.close(); }
 });
 
-test('群聊不走记忆服务', async () => {
+test('群聊记在群名下，不记在说话人名下；私聊的跨场合对话不进群提示词', async () => {
   const t = await setup();
   try {
     const brain = t.make(new RemoteMemory({ url: t.mem.url }));
+    brain.memory.logTurn({ where: 'private:10001', who: '主人', text: '私聊的秘密', reply: '好' });
+    await brain.reply({ key: 'group:20002', userId: '10001', text: '老张：大家好',
+                        history: [{ isSelf: false, text: '小李：今天好热' }] });
+    await settle();
+    assert.equal(t.memCalls.find((c) => c.url === '/context').body.user_id, 'group:20002');
+    assert.equal(t.memCalls.find((c) => c.url === '/ingest').body.user_id, 'group:20002');
+    const msgs = t.llmCalls[0].messages;
+    assert.doesNotMatch(msgs[0].content, /私聊的秘密/);
+    assert.deepEqual(msgs.slice(1).map((m) => m.content), ['小李：今天好热', '老张：大家好']);  // 群前文用传进来的
+  } finally { t.close(); }
+});
+
+test('groupMemory=false：群聊不走记忆服务', async () => {
+  const t = await setup();
+  try {
+    const brain = t.make(new RemoteMemory({ url: t.mem.url }));
+    brain.groupMemory = false;
     await brain.reply({ key: 'group:20002', userId: '10001', text: '大家好' });
     await settle();
     assert.equal(t.memCalls.length, 0);

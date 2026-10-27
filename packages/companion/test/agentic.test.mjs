@@ -88,12 +88,21 @@ test('一直要查也有上限：轮数用完后不许再调工具，直接回�
   } finally { t.close(); }
 });
 
-test('maxToolRounds=0 不给模型工具；群聊也不给', async () => {
+test('maxToolRounds=0 不给模型工具；groupMemory=false 时群聊也不给', async () => {
   const t = await setup(() => ({ content: '嗯' }));
   try {
     await t.brain({ maxToolRounds: 0 }).reply({ key: 'private:1', userId: '1', text: '在吗' });
-    await t.brain().reply({ key: 'group:2', userId: '1', text: '在吗' });
+    await t.brain({ groupMemory: false }).reply({ key: 'group:2', userId: '1', text: '在吗' });
     assert.equal(t.llmCalls[0].tools, undefined);
     assert.equal(t.llmCalls[1].tools, undefined);
+  } finally { t.close(); }
+});
+
+test('群聊查的是这个群的记忆', async () => {
+  const t = await setup((body, n) => (n === 1 ? callEntity('c1') : { content: '记得' }));
+  try {
+    await t.brain().reply({ key: 'group:2', userId: '1', text: '道友：你还记得王哥吗' });
+    assert.deepEqual(t.llmCalls[0].tools, TOOLS);
+    assert.equal(t.memCalls.find((c) => c.url === '/tool').body.user_id, 'group:2');
   } finally { t.close(); }
 });

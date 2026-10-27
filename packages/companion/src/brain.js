@@ -34,11 +34,12 @@ export class Brain {
    * @param {number}  [opts.timeoutMs] 默认 120000
    * @param {Role}    opts.role
    * @param {Memory}  opts.memory
-   * @param {import('./memory-remote.js').RemoteMemory} [opts.remote]  长期记忆服务（可选，目前只用于私聊）
+   * @param {import('./memory-remote.js').RemoteMemory} [opts.remote]  长期记忆服务（可选）
+   * @param {boolean} [opts.groupMemory]  群聊也用记忆服务，默认 true。每个群一份（记在 "group:群号" 名下），和私聊互不相通
    * @param {number}  [opts.maxToolRounds]  模型最多连着调几轮工具（查记忆、搜索），默认 3；0 = 不给模型工具
    * @param {import('./web-search.js').WebSearch} [opts.webSearch]  联网搜索（可选，私聊和群聊都给）
    */
-  constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, remote, maxToolRounds = 3, webSearch }) {
+  constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, remote, groupMemory = true, maxToolRounds = 3, webSearch }) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.model = model;
@@ -46,6 +47,7 @@ export class Brain {
     this.role = role || new Role({ cardPath: 'role.md' });
     this.memory = memory || new Memory({ dir: './data' });
     this.remote = remote || null;
+    this.groupMemory = groupMemory;
     this.maxToolRounds = maxToolRounds;
     this.webSearch = webSearch || null;
   }
@@ -73,6 +75,7 @@ export class Brain {
    * @param {string} input.userId      对方 id
    * @param {string} [input.userName]
    * @param {string} input.text        对方说的话（可以是合并后的一批）
+   * @param {string} [input.memoryText] 写进长期记忆的版本（默认同 text）；text 里展开了聊天记录这类别人的对话时用
    * @param {string} [input.situation] 处境描述（"你在群里，刚才在聊……"）
    * @param {Array}  [input.history]   该会话最近的消息（可选，通常靠 memory 就够）
    * @param {boolean}[input.record=true] 是否把这一轮写回记忆
@@ -80,20 +83,23 @@ export class Brain {
    * @returns {Promise<{text:string, reasoning?:string, raw:any, toolCalls:{name:string, args:object}[]}>}
    */
   async reply(input) {
-    const { key, userId, userName, text, situation = '', history = [], record = true, images = [] } = input;
+    const { key, userId, userName, text, memoryText = text, situation = '', history = [], record = true, images = [] } = input;
 
-    // 长期记忆服务目前只接私聊：群里一段话是好几个人说的，记到谁头上还没处理
-    const useRemote = this.remote && !String(key || '').startsWith('group:');
-    // 记忆工具：自动检索之外，模型觉得不够还能自己查（agentic RAG）；只在私聊给
+    // 长期记忆：私聊记在对方 QQ 号名下；群聊整个群一份，记在 "group:群号" 名下（群友在里面是一个个实体）。
+    // 两边分开存，私聊说的事不会在群里被想起来
+    const isGroup = String(key || '').startsWith('group:');
+    const useRemote = this.remote && (!isGroup || this.groupMemory);
+    const memId = isGroup ? key : userId;
+    // 记忆工具：自动检索之外，模型觉得不够还能自己查（agentic RAG）
     let memTools = useRemote && this.maxToolRounds > 0 ? await this.remote.tools() : null;
-    const ctx = useRemote ? await this.remote.context({ userId, text, tools: !!memTools }) : null;
+    const ctx = useRemote ? await this.remote.context({ userId: memId, text, tools: !!memTools }) : null;
     if (!ctx) memTools = null;   // 服务挂了：记忆工具也用不了
     // 联网搜索：私聊、群聊都给
     const web = this.webSearch && this.maxToolRounds > 0 ? this.webSearch : null;
     const tools = [...(memTools || []), ...(web ? [web.tool] : [])];
     const runTool = (name, args) => (web && name === web.tool.function.name
       ? web.run(args)
-      : memTools ? this.remote.callTool({ userId, name, args }) : Promise.resolve('没有这个工具：' + name));
+      : memTools ? this.remote.callTool({ userId: memId, name, args }) : Promise.resolve('没有这个工具：' + name));
     // 记忆块里自带「现在是…」；没有记忆块（群聊、服务挂了）时补上，不然模型不知道今天几号，搜新闻会带错年份
     const platform = [ctx ? '' : '现在是 ' + nowText() + '。', input.platform || '', web ? WEB_RULES : '']
       .filter(Boolean).join('\n');
@@ -104,7 +110,8 @@ export class Brain {
     const turns = !history.length && ctx?.history?.length
       ? ctx.history.map((m) => ({ isSelf: m.role === 'assistant', text: m.content }))
       : history;
-    const recent = this.memory.renderRecent(20, { excludeWhere: key });
+    // 「最近的真实对话（跨场合）」会把私聊带进群里的提示词；群里用了群记忆就不给，守住私聊和群的边界
+    const recent = isGroup && useRemote ? '' : this.memory.renderRecent(20, { excludeWhere: key });
     const sys = this.role.build({
       situation,
       memory: memLine,
@@ -152,10 +159,10 @@ export class Brain {
     const out = String(msg?.content || '').trim();
 
     if (record) {
-      this.memory.remember(userId, { name: userName, topic: (text || '').slice(0, 40) + ' → ' + out.slice(0, 40) });
-      this.memory.logTurn({ where: key, who: userName || userId, text, reply: out });
+      this.memory.remember(userId, { name: userName, topic: (memoryText || '').slice(0, 40) + ' → ' + out.slice(0, 40) });
+      this.memory.logTurn({ where: key, who: userName || userId, text: memoryText, reply: out });
       // 不等：服务端在后台抽取，失败也不影响这次回复
-      if (ctx && out) this.remote.ingest({ userId, text, reply: out });
+      if (ctx && out) this.remote.ingest({ userId: memId, text: memoryText, reply: out });
     }
     return { text: out, reasoning: msg?.reasoning_content, raw: json, toolCalls };
   }

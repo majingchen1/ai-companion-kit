@@ -12,15 +12,19 @@
  * 如果你想接别的平台（微信/Telegram/自研），照着这个接口再写一个就行。
  */
 
-/** 把 OneBot 消息段数组拼成纯文本 */
-function segsToText(segs) {
+/**
+ * 把 OneBot 消息段数组拼成纯文本。
+ * 给了 selfId 时 @ 自己的那段去掉：它只是在叫机器人（有没有被 @ 另看 isAtMe），
+ * 留成「如何评价@123456」模型会以为要评价 123456 这个人
+ */
+function segsToText(segs, selfId = '') {
   if (!Array.isArray(segs)) return String(segs || '');
   const out = [];
   for (const s of segs) {
     if (!s) continue;
     switch (s.type) {
       case 'text': out.push(s.data?.text || ''); break;
-      case 'at': out.push('@' + (s.data?.qq || '')); break;
+      case 'at': if (!selfId || String(s.data?.qq) !== selfId) out.push('@' + (s.data?.qq || '')); break;
       case 'image': out.push(isSticker(s.data) ? '[表情包]' : '[图片]'); break;
       case 'face': out.push('[表情]'); break;
       case 'reply': break;   // 引用单独处理
@@ -46,6 +50,12 @@ function imageRefs(segs) {
   if (!Array.isArray(segs)) return [];
   return segs.filter((s) => s?.type === 'image')
     .map((s) => ({ url: String(s.data?.url || ''), file: String(s.data?.file || ''), sticker: isSticker(s.data) }));
+}
+
+/** 摘出消息里的合并转发（聊天记录）id，交给 getForward 展开 */
+function forwardIds(segs) {
+  if (!Array.isArray(segs)) return [];
+  return segs.filter((s) => s?.type === 'forward' && s.data?.id).map((s) => String(s.data.id));
 }
 
 /** 分享卡片（json 段）→ 标题 + 描述 + 链接，让模型知道分享的是什么（教程 FAQ Q6） */
@@ -134,8 +144,9 @@ export class OneBot {
       groupId: isGroup ? String(ev.group_id) : '',
       userId: String(ev.user_id),
       name: String(ev.sender?.card || ev.sender?.nickname || ev.user_id),
-      text: segsToText(segs),
+      text: segsToText(segs, this.selfId) || (atMe ? '（@了你一下）' : ''),
       images: imageRefs(segs),
+      forwards: forwardIds(segs),
       raw: segs,
       isAtMe: atMe,
       isQuoteMe: false,   // 需要额外查询被引用消息的发送者，见 resolveQuote
@@ -202,6 +213,46 @@ export class OneBot {
       : { user_id: id, event_type: on ? 1 : 0 });
   }
 
+  /** 取一条消息的内容（被引用的消息）：谁发的、文字、图；查不到返回 null */
+  async getMsg(messageId) {
+    const r = await this.api('get_msg', { message_id: messageId });
+    const d = r.ok ? r.data?.data : null;
+    if (!d) return null;
+    return {
+      userId: String(d.sender?.user_id || d.user_id || ''),
+      name: String(d.sender?.card || d.sender?.nickname || d.user_id || ''),
+      text: segsToText(d.message, this.selfId),
+      images: imageRefs(d.message),
+      forwards: forwardIds(d.message),
+    };
+  }
+
+  /**
+   * 展开一条合并转发（聊天记录）：每条是谁说的、说了什么、带的图。
+   * 转发里套着的转发再展开 depth 层，更深的只留「[聊天记录]」。查不到返回 null
+   * @returns {Promise<{name:string, text:string, images:object[], depth:number}[]|null>}
+   */
+  async getForward(id, { depth = 1 } = {}) {
+    const r = await this.api('get_forward_msg', { id, message_id: id });
+    const list = r.ok ? (r.data?.data?.messages || r.data?.data?.message || null) : null;
+    if (!Array.isArray(list)) return null;
+    const out = [];
+    for (const n of list) {
+      const segs = n.message || n.content || [];
+      out.push({
+        name: String(n.sender?.card || n.sender?.nickname || n.user_id || '某人'),
+        text: segsToText(segs),
+        images: imageRefs(segs),
+        depth: 0,
+      });
+      for (const fid of depth > 0 ? forwardIds(segs) : []) {
+        const inner = await this.getForward(fid, { depth: depth - 1 });
+        for (const m of inner || []) out.push({ ...m, depth: m.depth + 1 });
+      }
+    }
+    return out;
+  }
+
   /** 查一条消息是谁发的（用来判断引用的是不是我） */
   async whoSent(messageId) {
     const r = await this.api('get_msg', { message_id: messageId });
@@ -209,5 +260,5 @@ export class OneBot {
   }
 }
 
-export { segsToText, imageRefs };
+export { segsToText, imageRefs, forwardIds };
 export default OneBot;

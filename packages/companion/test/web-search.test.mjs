@@ -76,7 +76,7 @@ async function llmServer(reply) {
   return { url: 'http://127.0.0.1:' + srv.address().port, calls, close: () => srv.close() };
 }
 
-test('群聊只给搜索工具，私聊记忆 + 搜索都给；搜索结果带回给模型', async () => {
+test('群聊、私聊都给记忆 + 搜索（groupMemory=false 时群里只给搜索）；搜索结果带回给模型', async () => {
   const llm = await llmServer((body, n) => (body.messages.at(-1).role === 'tool'
     ? { content: '北京今天多云' }
     : { content: '', tool_calls: [{ id: 's' + n, type: 'function', function: { name: 'web_search', arguments: '{"query":"北京 天气"}' } }] }));
@@ -91,7 +91,7 @@ test('群聊只给搜索工具，私聊记忆 + 搜索都给；搜索结果带�
     const g = await brain.reply({ key: 'group:1', userId: '2', text: '@小鱼 北京天气咋样' });
     assert.equal(g.text, '北京今天多云');
     assert.deepEqual(g.toolCalls, [{ name: 'web_search', args: { query: '北京 天气' } }]);
-    assert.deepEqual(llm.calls[0].tools.map((t) => t.function.name), ['web_search']);
+    assert.deepEqual(llm.calls[0].tools.map((t) => t.function.name), ['get_entity', 'web_search']);
     assert.match(llm.calls[0].messages[0].content, /web_search 上网查/);
     assert.match(llm.calls[1].messages.at(-1).content, /多云/);
 

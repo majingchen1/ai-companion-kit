@@ -29,7 +29,7 @@
     "start": "node src/index.js --config ./config.json",
     "check": "node src/index.js --check --config ./config.json",
     "dry": "node src/index.js --dry-run --config ./config.json",
-    "test": "node --test test/memory-remote.test.mjs test/wake-group.test.mjs test/role.test.mjs test/humanize.test.mjs test/agentic.test.mjs test/risk.test.mjs test/media.test.mjs test/web-search.test.mjs",
+    "test": "node --test test/memory-remote.test.mjs test/wake-group.test.mjs test/role.test.mjs test/humanize.test.mjs test/agentic.test.mjs test/risk.test.mjs test/media.test.mjs test/web-search.test.mjs test/group-log.test.mjs",
     "diary": "node src/diary.js",
     "diary:auto": "node src/diary.js auto"
   },

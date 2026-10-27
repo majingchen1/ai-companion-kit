@@ -84,10 +84,45 @@
   "// 8": "=== 日记（她自己写）===",
   "diaryDir": "data/diary",
   "diaryMaxChars": 2000,
-  "// 9": "=== 长期记忆服务（可选，companion_memory 的 server.py；不填 url 就只用本地账本，目前只接私聊）===",
+  "// 9": "=== 长期记忆服务（可选，companion_memory 的 server.py；不填 url 就只用本地账本）===",
+  "// 9.1": "groupMemory：群聊也记，每个群一份，和私聊互不相通；false = 只记私聊",
   "memoryService": {
     "url": "",
     "timeoutMs": 8000,
-    "maxToolRounds": 3
+    "maxToolRounds": 3,
+    "groupMemory": true
+  },
+  "// 10": "=== 群聊前文：白名单群的消息在内存里留一段（不落盘、不进长期记忆），被 @ 时当前文 ===",
+  "// 10.1": "maxMessages 每个群留几条；historyCount 被 @ 时带几条给模型（越多越费 token）；maxAgeMinutes 多久以前的不算",
+  "// 10.2": "images：有人说「上面那张图」、这一轮又没带图时，从前文最近 lookback 条里找图，最多 maxCount 张；句子里有 keywords 里的词才找",
+  "groupContext": {
+    "maxMessages": 30,
+    "historyCount": 15,
+    "maxAgeMinutes": 30,
+    "images": {
+      "enabled": true,
+      "keywords": ["图", "照片", "截图", "表情包", "这张", "那张"],
+      "lookback": 10,
+      "maxCount": 1
+    }
+  },
+  "// 11": "=== 引用（QQ 的「回复」）：把被引用的原文拼进这句话，私聊群聊都管用 ===",
+  "// 11.1": "maxChars 引用原文最多带几个字；images 被引用消息里的图也给模型看",
+  "quote": {
+    "enabled": true,
+    "maxChars": 300,
+    "images": true
+  },
+  "// 12": "=== 聊天记录（合并转发）：展开成一条条「谁：说了什么」给模型看，私聊群聊都管用；展开的内容不进长期记忆 ===",
+  "// 12.1": "maxMessages/maxChars 每段最多展开几条、几个字（越多越费 token）；depth 聊天记录里套的聊天记录再展开几层；images 里面的图也给模型看",
+  "// 12.2": "有人说「上面的聊天记录」、这一轮又没带时，从群前文最近 lookback 条里找；句子里有 keywords 里的词才找",
+  "forward": {
+    "enabled": true,
+    "maxMessages": 50,
+    "maxChars": 3000,
+    "depth": 1,
+    "images": true,
+    "keywords": ["聊天记录", "转发"],
+    "lookback": 10
   }
 }
