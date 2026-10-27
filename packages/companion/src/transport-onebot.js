@@ -21,13 +21,44 @@ function segsToText(segs) {
     switch (s.type) {
       case 'text': out.push(s.data?.text || ''); break;
       case 'at': out.push('@' + (s.data?.qq || '')); break;
-      case 'image': out.push('[图片]'); break;
+      case 'image': out.push(isSticker(s.data) ? '[表情包]' : '[图片]'); break;
       case 'face': out.push('[表情]'); break;
       case 'reply': break;   // 引用单独处理
+      // 下面这些以前直接丢掉：只发一条语音/卡片时会变成空消息，私聊里照样唤醒，模型对着空白回话
+      case 'record': out.push('[语音]'); break;
+      case 'video': out.push('[视频]'); break;
+      case 'file': out.push('[文件' + (s.data?.name ? '：' + s.data.name : '') + ']'); break;
+      case 'forward': out.push('[聊天记录]'); break;
+      case 'json': out.push(cardText(s.data?.data)); break;
       default: break;
     }
   }
   return out.join('').trim();
+}
+
+/** 动画表情 / 商城表情包（sub_type=1 或带 emoji_id），跟正经图片区分开 */
+function isSticker(d) {
+  return Number(d?.sub_type) === 1 || !!d?.emoji_id;
+}
+
+/** 摘出消息里的图片，交给 media.loadImages 下载 */
+function imageRefs(segs) {
+  if (!Array.isArray(segs)) return [];
+  return segs.filter((s) => s?.type === 'image')
+    .map((s) => ({ url: String(s.data?.url || ''), file: String(s.data?.file || ''), sticker: isSticker(s.data) }));
+}
+
+/** 分享卡片（json 段）→ 标题 + 描述 + 链接，让模型知道分享的是什么（教程 FAQ Q6） */
+function cardText(raw) {
+  try {
+    const j = typeof raw === 'string' ? JSON.parse(raw) : raw;
+    const d = j?.meta?.detail_1 || j?.meta?.news || Object.values(j?.meta || {})[0] || {};
+    const url = d.qqdocurl || d.jumpUrl || d.url || '';
+    const parts = [d.title, d.desc && d.desc !== d.title ? '（' + d.desc + '）' : '', url].filter(Boolean);
+    return parts.length ? '[卡片] ' + parts.join(' ') : '[卡片]';
+  } catch {
+    return '[卡片]';
+  }
 }
 
 /** 从消息段里找引用 */
@@ -43,12 +74,14 @@ export class OneBot {
    * @param {string} opts.wsUrl       例如 ws://127.0.0.1:3001
    * @param {string} [opts.httpUrl]   例如 http://127.0.0.1:3000（发消息用）
    * @param {string} [opts.accessToken]
+   * @param {string} [opts.httpAccessToken]  HTTP 和 WS 的 token 不一样时填（比如 SnowLuma 分开配置），默认同 accessToken
    * @param {(msg:object)=>void} [opts.onMessage]
    */
-  constructor({ wsUrl, httpUrl, accessToken = '', onMessage }) {
+  constructor({ wsUrl, httpUrl, accessToken = '', httpAccessToken = '', onMessage }) {
     this.wsUrl = wsUrl;
     this.httpUrl = (httpUrl || '').replace(/\/+$/, '');
     this.accessToken = accessToken;
+    this.httpAccessToken = httpAccessToken || accessToken;
     this.onMessage = onMessage;
     this.selfId = '';
     this.ws = null;
@@ -56,9 +89,9 @@ export class OneBot {
     this.#connect();
   }
 
-  #headers() {
+  #headers(token = this.accessToken) {
     const h = {};
-    if (this.accessToken) h.authorization = 'Bearer ' + this.accessToken;
+    if (token) h.authorization = 'Bearer ' + token;
     return h;
   }
 
@@ -102,6 +135,7 @@ export class OneBot {
       userId: String(ev.user_id),
       name: String(ev.sender?.card || ev.sender?.nickname || ev.user_id),
       text: segsToText(segs),
+      images: imageRefs(segs),
       raw: segs,
       isAtMe: atMe,
       isQuoteMe: false,   // 需要额外查询被引用消息的发送者，见 resolveQuote
@@ -118,7 +152,7 @@ export class OneBot {
     try {
       const r = await fetch(this.httpUrl + '/' + action, {
         method: 'POST',
-        headers: { 'content-type': 'application/json', ...this.#headers() },
+        headers: { 'content-type': 'application/json', ...this.#headers(this.httpAccessToken) },
         body: JSON.stringify(params),
         signal: AbortSignal.timeout(30000),
       });
@@ -130,22 +164,27 @@ export class OneBot {
     }
   }
 
-  /** 发一条纯文本 */
+  /**
+   * 发一条纯文本
+   * 用消息段数组而不是字符串：字符串会被 OneBot 当 CQ 码解析，模型（或被群友诱导）说出
+   * 「[CQ:at,qq=all]」就真的 @全体，说出「[CQ:image,file=本地路径]」就真的把本机文件发出去
+   */
   send(key, text, { atUserId } = {}) {
     const isGroup = key.startsWith('group:');
     const id = key.split(':')[1];
-    let message = String(text);
-    if (atUserId) message = '[CQ:at,qq=' + atUserId + '] ' + message;
+    const message = [];
+    if (atUserId) message.push({ type: 'at', data: { qq: String(atUserId) } }, { type: 'text', data: { text: ' ' } });
+    message.push({ type: 'text', data: { text: String(text) } });
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });
   }
 
-  /** 发一张图（本地文件或 URL） */
+  /** 发一张图（本地文件或 URL）—— 只给程序自己调，别把模型输出直接传进来 */
   sendImage(key, file) {
     const isGroup = key.startsWith('group:');
     const id = key.split(':')[1];
-    const message = '[CQ:image,file=' + file + ']';
+    const message = [{ type: 'image', data: { file: String(file) } }];
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });
@@ -170,5 +209,5 @@ export class OneBot {
   }
 }
 
-export { segsToText };
+export { segsToText, imageRefs };
 export default OneBot;

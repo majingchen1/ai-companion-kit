@@ -27,6 +27,9 @@ export class Humanizer {
    * @param {[number,number]} [opts.gapRange]  条间停顿范围（毫秒）
    * @param {number}  [opts.longGapChance=0.25] 出现"长停顿"的概率
    * @param {[number,number]} [opts.longGapRange] 长停顿范围
+   * @param {number}  [opts.typingMinChars=20]       短于这么多字的不上报「正在输入」
+   * @param {number}  [opts.typingMinIntervalMs=45000] 两次「正在输入」上报至少隔这么久
+   * @param {number}  [opts.typingProbability=0.35]  满足上面两条时，按这个概率才上报
    */
   constructor(opts = {}) {
     this.enabled = opts.enabled !== false;
@@ -38,15 +41,27 @@ export class Humanizer {
     this.gapRange = opts.gapRange ?? [700, 2600];
     this.longGapChance = opts.longGapChance ?? 0.25;
     this.longGapRange = opts.longGapRange ?? [3000, 9000];
+    // 「正在输入」上报太勤是被风控的原因之一（教程第十三章②：一天 175 次 → 压到 20 次左右）
+    this.typingMinChars = opts.typingMinChars ?? 20;
+    this.typingMinIntervalMs = opts.typingMinIntervalMs ?? 45000;
+    this.typingProbability = opts.typingProbability ?? 0.35;
+    this.lastTypingAt = 0;
+  }
+
+  /** 这一条要不要上报「正在输入」（不上报也照样按字数等一会儿再发） */
+  shouldShowTyping(text, now = Date.now()) {
+    if ([...String(text || '')].length < this.typingMinChars) return false;
+    if (now - this.lastTypingAt < this.typingMinIntervalMs) return false;
+    return Math.random() < this.typingProbability;
   }
 
   /** 按字数算"正在输入"该持续多久 */
   typingMsFor(text) {
     const n = [...String(text || '')].length;
     let ms = this.minMs + n * this.msPerChar;
-    ms = Math.min(this.maxMs, Math.max(this.minMs, ms));
-    // 抖动
+    // 先抖动再夹到 [minMs, maxMs]：反过来的话抖动会让结果跌破 minMs（自检偶尔因此失败）
     ms *= 1 + (Math.random() * 2 - 1) * this.jitter;
+    ms = Math.min(this.maxMs, Math.max(this.minMs, ms));
     // 深夜慢一点（半睡半醒）
     const h = new Date().getHours();
     if (h >= NIGHT.from && h < NIGHT.to) ms *= 1.6;
@@ -73,26 +88,36 @@ export class Humanizer {
   split(text, max = this.burstMax) {
     const raw = String(text || '').trim();
     if (!raw) return [];
-    // 先按换行
-    let parts = raw.split(/\n+/).map((s) => s.trim()).filter(Boolean);
-    // 再按中文标点切过长的
+    // 代码块（```…```）整段算一条：按行拆开发，代码就散了。QQ 不渲染 Markdown，围栏去掉只留代码
     const out = [];
-    for (const p of parts) {
-      if ([...p].length <= 40) { out.push(p); continue; }
-      const segs = p.split(/(?<=[。！？!?…~])\s*/).map((s) => s.trim()).filter(Boolean);
-      out.push(...(segs.length ? segs : [p]));
+    const code = new Set();
+    for (const [i, chunk] of raw.split(/(```[^\n`]*\n?[\s\S]*?```)/).entries()) {
+      if (i % 2) {
+        const body = chunk.replace(/^```[^\n`]*\n?/, '').replace(/\n?```$/, '').trimEnd();
+        if (body.trim()) { out.push(body); code.add(out.length - 1); }
+        continue;
+      }
+      // 普通文字：先按换行，再按中文标点切过长的
+      for (const p of chunk.split(/\n+/).map((s) => s.trim()).filter(Boolean)) {
+        if ([...p].length <= 40) { out.push(p); continue; }
+        const segs = p.split(/(?<=[。！？!?…~])\s*/).map((s) => s.trim()).filter(Boolean);
+        out.push(...(segs.length ? segs : [p]));
+      }
     }
-    // 合并太短的相邻项
+    // 合并太短的相邻项（代码不参与）
     const merged = [];
-    for (const s of out) {
+    const isCode = [];
+    for (const [i, s] of out.entries()) {
       const last = merged[merged.length - 1];
-      if (last && [...last].length < 6 && [...last].length + [...s].length <= 24) merged[merged.length - 1] = last + s;
-      else merged.push(s);
+      if (last && !code.has(i) && !isCode[isCode.length - 1]
+          && [...last].length < 6 && [...last].length + [...s].length <= 24) merged[merged.length - 1] = last + s;
+      else { merged.push(s); isCode.push(code.has(i)); }
     }
-    // 超量就合并
+    // 超量就合并；里面有代码时用换行拼，免得代码被压成一行
     if (merged.length > max) {
       const head = merged.slice(0, max - 1);
-      head.push(merged.slice(max - 1).join(' '));
+      const tail = merged.slice(max - 1);
+      head.push(tail.join(isCode.slice(max - 1).some(Boolean) ? '\n' : ' '));
       return head;
     }
     return merged;
@@ -121,10 +146,13 @@ export class Humanizer {
     let sent = 0;
     for (let i = 0; i < parts.length; i++) {
       const p = parts[i];
-      // 1) 先"正在输入"
-      if (setTyping) { try { await setTyping(true); } catch { /* 有些平台不支持，忽略 */ } }
+      // 1) 先"正在输入"（限频上报）。不发「停止输入」：消息一发出去对方那边的提示自己就没了，
+      //    而且 SnowLuma 里 event_type=0 也是「正在输入」，发了等于多上报一次
+      if (setTyping && this.shouldShowTyping(p)) {
+        this.lastTypingAt = Date.now();
+        try { await setTyping(true); } catch { /* 有些平台不支持，忽略 */ }
+      }
       await wait(this.typingMsFor(p));
-      if (setTyping) { try { await setTyping(false); } catch {} }
       // 2) 发出去
       await send(p);
       sent++;

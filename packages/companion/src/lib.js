@@ -31,9 +31,13 @@
  *   waker.shouldWake({ key: 'group:1', userId: '9', text: '@小鱼 在吗', isAtMe: true });
  */
 export { Memory } from './memory.js';
+export { RemoteMemory } from './memory-remote.js';
 export { Role } from './role.js';
 export { Brain } from './brain.js';
 export { Humanizer } from './humanize.js';
+export { SendGate } from './send-gate.js';
+export { loadImages } from './media.js';
+export { WebSearch } from './web-search.js';
 export { Waker } from './wake.js';
 export { Diary } from './diary.js';
 export { OneBot, segsToText } from './transport-onebot.js';

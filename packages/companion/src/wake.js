@@ -56,6 +56,8 @@ export class Waker {
       speakerIds: [],
       probability: this.probability,
       anyMessage: false,
+      ownerAlwaysWakes: true,  // 主人说话必醒；群里「只回 @」时要关掉，否则主人每句都接
+      globalKeywords: true,    // 是否也认构造时传入的全局关键词
       ...cfg,
     });
   }
@@ -106,7 +108,7 @@ export class Waker {
     const uid = String(msg.userId || '');
 
     // 主人（或指定的人）说话 → 一定醒
-    if (this.ownerIds.includes(uid) && c.mode !== 'active') return { wake: true, reason: 'owner' };
+    if (c.ownerAlwaysWakes && this.ownerIds.includes(uid) && c.mode !== 'active') return { wake: true, reason: 'owner' };
     if (Array.isArray(c.speakerIds) && c.speakerIds.map(String).includes(uid)) {
       return { wake: true, reason: 'speaker' };
     }
@@ -123,7 +125,7 @@ export class Waker {
       if (hit) return { wake: true, reason: 'name:' + hit };
     }
 
-    const kw = [...(c.keywords || []), ...this.keywords];
+    const kw = [...(c.keywords || []), ...(c.globalKeywords ? this.keywords : [])];
     if (kw.length) {
       const hit = kw.find((k) => k && text.includes(k));
       if (hit) return { wake: true, reason: 'keyword:' + hit };

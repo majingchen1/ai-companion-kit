@@ -26,7 +26,7 @@ export class Role {
   /**
    * @param {object} opts
    * @param {string} opts.cardPath       角色卡文件路径（.md）
-   * @param {number} [opts.maxChars]     注入上限，超出会截断
+   * @param {number} [opts.maxChars]     角色卡注入上限（只算角色卡本身），超出会截断
    * @param {string} [opts.extra]        额外追加的运行时规则
    */
   constructor({ cardPath, maxChars = 12000, extra = '' } = {}) {
@@ -73,11 +73,10 @@ export class Role {
     parts.push(BASE_RULES);
     if (this.extra) parts.push(this.extra.trim());
 
+    // maxChars 只管角色卡本身（和 lint 的检查一致）。以前是「整个提示词减去前面各段」剩多少给多少，
+    // 记忆和最近对话一长（最近 20 轮最多一万多字），角色卡就被悄悄截短甚至整段挤掉，人设失效还不报错
     const card = this.read();
-    if (card) {
-      const room = Math.max(0, this.maxChars - parts.join('\n\n').length);
-      parts.push('【完整设定】\n' + (card.length > room ? card.slice(0, room) : card));
-    }
+    if (card) parts.push('【完整设定】\n' + (card.length > this.maxChars ? card.slice(0, this.maxChars) : card));
     if (ctx.platform) parts.push('【平台给你的说明】\n' + ctx.platform.trim());
 
     return parts.filter(Boolean).join('\n\n');
