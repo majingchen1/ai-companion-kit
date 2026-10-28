@@ -38,6 +38,7 @@ export { Humanizer } from './humanize.js';
 export { SendGate } from './send-gate.js';
 export { loadImages } from './media.js';
 export { WebSearch } from './web-search.js';
+export { WebRead } from './web-read.js';
 export { Waker } from './wake.js';
 export { Diary } from './diary.js';
 export { OneBot, segsToText } from './transport-onebot.js';

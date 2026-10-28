@@ -191,11 +191,16 @@ export class OneBot {
       : this.api('send_private_msg', { user_id: id, message });
   }
 
-  /** 发一张图（本地文件或 URL）—— 只给程序自己调，别把模型输出直接传进来 */
-  sendImage(key, file) {
+  /**
+   * 发一张图（本地文件、URL 或 base64://）—— 只给程序自己调，别把模型输出直接传进来
+   * sticker=true 按表情包发（sub_type=1，QQ 里显示成小尺寸表情；不认这个字段的实现会当普通图片发）
+   */
+  sendImage(key, file, { sticker = false } = {}) {
     const isGroup = key.startsWith('group:');
     const id = key.split(':')[1];
-    const message = [{ type: 'image', data: { file: String(file) } }];
+    const data = { file: String(file) };
+    if (sticker) Object.assign(data, { sub_type: 1, summary: '[动画表情]' });
+    const message = [{ type: 'image', data }];
     return isGroup
       ? this.api('send_group_msg', { group_id: id, message })
       : this.api('send_private_msg', { user_id: id, message });

@@ -8,6 +8,7 @@ yarn.lock
 config.json
 role.md
 data/
+stickers/
 *.log
 
 # 截图输出

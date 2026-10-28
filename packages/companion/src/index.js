@@ -26,7 +26,9 @@ import { Humanizer } from './humanize.js';
 import { SendGate } from './send-gate.js';
 import { loadImages } from './media.js';
 import { WebSearch } from './web-search.js';
+import { WebRead, resolveProxy } from './web-read.js';
 import { GroupLog } from './group-log.js';
+import { Stickers } from './stickers.js';
 import { attachQuotes, contextForwardIds, contextImageRefs, expandForwards } from './turn-context.js';
 import { Waker } from './wake.js';
 import { OneBot } from './transport-onebot.js';
@@ -90,6 +92,14 @@ export function loadConfig(explicitPath) {
       maxResults: cfg.webSearch?.maxResults ?? 6,
       timeoutMs: cfg.webSearch?.timeoutMs ?? 30000,
     },
+    // 读链接：对方发网址 / 分享卡片时，模型可以调 read_url 打开看（只抓网页本身、不跑 JS；内网和本机地址一律不碰）
+    webRead: {
+      enabled: cfg.webRead?.enabled !== false,
+      maxChars: cfg.webRead?.maxChars ?? 3000,       // 正文最多给模型看多少字（越多越费 token）
+      timeoutMs: cfg.webRead?.timeoutMs ?? 10000,
+      maxBytes: cfg.webRead?.maxBytes ?? 2 * 1024 * 1024,
+      proxy: cfg.webRead?.proxy || '',                 // 'env' 读 HTTPS_PROXY，或直接写 'http://127.0.0.1:10808'；墙外网站要用
+    },
     // 群聊前文：白名单群里的消息在内存里留一段，被 @ 时当前文给模型
     groupContext: {
       maxMessages: cfg.groupContext?.maxMessages ?? 30,     // 每个群在内存里留几条
@@ -119,6 +129,13 @@ export function loadConfig(explicitPath) {
       // 有人说「上面的聊天记录」、这一轮又没带时，从群前文最近 lookback 条里找；句子里有 keywords 里的词才找
       keywords: cfg.forward?.keywords || ['聊天记录', '转发'],
       lookback: cfg.forward?.lookback ?? 10,
+    },
+    // 表情包：dir 文件夹里放图，文件名就是含义（无语.gif）；模型偶尔发一张，同一个会话发过后 cooldownMinutes 内不再发
+    stickers: {
+      enabled: cfg.stickers?.enabled !== false,
+      dir: rel(cfg.stickers?.dir, 'stickers'),
+      cooldownMinutes: cfg.stickers?.cooldownMinutes ?? 20,
+      maxBytes: cfg.stickers?.maxBytes ?? 2 * 1024 * 1024,
     },
     // 发送限频 + 熔断（教程第十三章：别调高）
     send: {
@@ -155,7 +172,10 @@ async function main() {
   console.log('  长期记忆  ' + (cfg.memoryService.url
     ? cfg.memoryService.url + (cfg.memoryService.groupMemory ? '（私聊 + 每个群各一份）' : '（只记私聊）')
     : '（没配，只用本地账本）'));
+  console.log('  读链接    ' + (cfg.webRead.enabled ? '开（正文最多 ' + cfg.webRead.maxChars + ' 字' + (cfg.webRead.proxy ? '，走代理 ' + (resolveProxy(cfg.webRead.proxy)?.host || '（环境变量里没有）') : '') + '）' : '（没开）'));
   console.log('  联网搜索  ' + (cfg.webSearch.enabled ? cfg.webSearch.model + ' @ ' + cfg.webSearch.baseUrl : '（没开）'));
+  const stickers = cfg.stickers.enabled ? new Stickers(cfg.stickers) : null;
+  console.log('  表情包    ' + (stickers ? stickers.list().size + ' 张 @ ' + cfg.stickers.dir : '（没开）'));
   console.log('  干跑      ' + (cfg.dryRun ? '是（不会真发）' : '否'));
   console.log('');
 
@@ -186,7 +206,8 @@ async function main() {
     : null;
   const brain = new Brain({ apiKey: cfg.apiKey, baseUrl: cfg.baseUrl, model: cfg.model, role, memory, remote,
                             groupMemory: cfg.memoryService.groupMemory,
-                            maxToolRounds: cfg.memoryService.maxToolRounds, webSearch });
+                            maxToolRounds: cfg.memoryService.maxToolRounds, webSearch,
+                            webRead: cfg.webRead.enabled ? new WebRead(cfg.webRead) : null });
   const human = new Humanizer(cfg.humanize);
   const gate = new SendGate(cfg.send);
   const groupLog = new GroupLog({ maxPerGroup: cfg.groupContext.maxMessages,
@@ -234,7 +255,7 @@ async function main() {
       pending.set(msg.key, setTimeout(() => {
         const items = waker.flush(msg.key);
         if (!items.length) return;
-        handleTurn({ bot, brain, human, memory, waker, gate, groupLog }, items, cfg)
+        handleTurn({ bot, brain, human, memory, waker, gate, groupLog, stickers }, items, cfg)
           .catch((e) => console.error('[出错] ' + (e?.message || e)));
       }, win));
     },
@@ -303,7 +324,7 @@ export function buildSituation(items, cfg) {
 }
 
 /** 处理一轮（可能是合并后的多条） */
-export async function handleTurn({ bot, brain, human, memory, waker, gate = new SendGate(), groupLog = null }, items, cfg) {
+export async function handleTurn({ bot, brain, human, memory, waker, gate = new SendGate(), groupLog = null, stickers = null }, items, cfg) {
   const last = items[items.length - 1];
   const key = last.key;
   // 引用了别的消息：把原文拼进来，不然模型只看到「你觉得呢」
@@ -351,19 +372,21 @@ export async function handleTurn({ bot, brain, human, memory, waker, gate = new 
   const history = last.isGroup && groupLog
     ? groupLog.recent(key, { exclude: items, n: cfg.groupContext?.historyCount ?? 15 })
     : [];
-  const { text: out, toolCalls } = await brain.reply({ key, userId: last.userId, userName: last.name, text, memoryText,
-                                                       situation, images, history });
+  const { text: raw, toolCalls } = await brain.reply({ key, userId: last.userId, userName: last.name, text, memoryText,
+                                                       situation, images, history, platform: stickers?.prompt(key) || '' });
   if (toolCalls?.length) {
-    console.log('   查记忆：' + toolCalls.map((c) => c.name + '(' + Object.values(c.args).join(', ') + ')').join(' → '));
+    console.log('   用工具：' + toolCalls.map((c) => c.name + '(' + Object.values(c.args).join(', ') + ')').join(' → '));
   }
-  if (!out) { console.log('   （没说话）'); return; }
+  // 【表情:无语】摘出来另发；文件夹里没有、或者还在冷却的就丢掉
+  const { text: out, name: sticker } = stickers ? stickers.take(key, raw) : { text: raw, name: null };
+  if (!out && !sticker) { console.log('   （没说话）'); return; }
 
-  if (cfg.dryRun) { console.log('   [干跑] 会说：' + out); return; }
+  if (cfg.dryRun) { console.log('   [干跑] 会说：' + out + (sticker ? ' 【表情:' + sticker + '】' : '')); return; }
 
   // 每条都过闸门：超频或熔断就停在这一条，剩下的不发；发送失败不重试（重试风暴是风控主因）
   const sent = [];
   try {
-    await human.say(out, {
+    if (out) await human.say(out, {
       setTyping: (on) => bot.setTyping(key, on),
       send: async (m) => {
         const g = gate.allow();
@@ -374,6 +397,16 @@ export async function handleTurn({ bot, brain, human, memory, waker, gate = new 
         sent.push(m);
       },
     });
+    if (sticker) {
+      if (out) await new Promise((r) => setTimeout(r, human.gapMs?.() ?? 1000));
+      const g = gate.allow();
+      if (!g.ok) throw new Error('表情包没发出去（' + g.reason + '）');
+      const res = await bot.sendImage(key, stickers.file(sticker), { sticker: true });
+      gate.record(res.ok);
+      if (!res.ok) throw new Error('表情包发送失败：' + (res.error || '未知原因'));
+      stickers.mark(key);
+      sent.push('【表情:' + sticker + '】');
+    }
   } catch (e) {
     console.log('   ' + e.message + (sent.length ? '（已发 ' + sent.length + ' 条）' : ''));
     if (!sent.length) return;

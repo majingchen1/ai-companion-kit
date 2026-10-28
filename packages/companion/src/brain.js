@@ -25,6 +25,11 @@ const WEB_RULES = `你可以用 web_search 上网查。
 - 查到了就用自己的话简短说，像朋友转述，不要贴链接列表、不要表格，对方要链接再给。
 - 查不到或者说法不一，就直说。`;
 
+/** 给了读链接工具时附在提示词末尾 */
+const READ_RULES = `你可以用 read_url 打开对方发的链接（网址、分享卡片里的链接）看内容。
+- 对方发了链接、想让你看看或者问里面讲了什么，就先读再说；只是顺手贴个链接、没问什么时，不一定要读。
+- 读到的内容用自己的话说重点，别整段复述；打不开就直说没打开。`;
+
 export class Brain {
   /**
    * @param {object} opts
@@ -38,8 +43,9 @@ export class Brain {
    * @param {boolean} [opts.groupMemory]  群聊也用记忆服务，默认 true。每个群一份（记在 "group:群号" 名下），和私聊互不相通
    * @param {number}  [opts.maxToolRounds]  模型最多连着调几轮工具（查记忆、搜索），默认 3；0 = 不给模型工具
    * @param {import('./web-search.js').WebSearch} [opts.webSearch]  联网搜索（可选，私聊和群聊都给）
+   * @param {import('./web-read.js').WebRead} [opts.webRead]  读链接（可选，私聊和群聊都给）
    */
-  constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, remote, groupMemory = true, maxToolRounds = 3, webSearch }) {
+  constructor({ apiKey, baseUrl = 'https://api.deepseek.com/v1', model = 'deepseek-chat', timeoutMs = 120000, role, memory, remote, groupMemory = true, maxToolRounds = 3, webSearch, webRead }) {
     this.apiKey = apiKey;
     this.baseUrl = baseUrl.replace(/\/+$/, '');
     this.model = model;
@@ -50,6 +56,7 @@ export class Brain {
     this.groupMemory = groupMemory;
     this.maxToolRounds = maxToolRounds;
     this.webSearch = webSearch || null;
+    this.webRead = webRead || null;
   }
 
   /** 调一次模型。tools 给了就允许它调工具；toolChoice='none' 时带着工具定义但不让调（用来收尾） */
@@ -96,12 +103,16 @@ export class Brain {
     if (!ctx) memTools = null;   // 服务挂了：记忆工具也用不了
     // 联网搜索：私聊、群聊都给
     const web = this.webSearch && this.maxToolRounds > 0 ? this.webSearch : null;
-    const tools = [...(memTools || []), ...(web ? [web.tool] : [])];
-    const runTool = (name, args) => (web && name === web.tool.function.name
-      ? web.run(args)
-      : memTools ? this.remote.callTool({ userId: memId, name, args }) : Promise.resolve('没有这个工具：' + name));
+    const reader = this.webRead && this.maxToolRounds > 0 ? this.webRead : null;
+    const local = [web, reader].filter(Boolean);   // 本地执行的工具；其余的交给记忆服务
+    const tools = [...(memTools || []), ...local.map((t) => t.tool)];
+    const runTool = (name, args) => {
+      const own = local.find((t) => t.tool.function.name === name);
+      if (own) return own.run(args);
+      return memTools ? this.remote.callTool({ userId: memId, name, args }) : Promise.resolve('没有这个工具：' + name);
+    };
     // 记忆块里自带「现在是…」；没有记忆块（群聊、服务挂了）时补上，不然模型不知道今天几号，搜新闻会带错年份
-    const platform = [ctx ? '' : '现在是 ' + nowText() + '。', input.platform || '', web ? WEB_RULES : '']
+    const platform = [ctx ? '' : '现在是 ' + nowText() + '。', input.platform || '', web ? WEB_RULES : '', reader ? READ_RULES : '']
       .filter(Boolean).join('\n');
     const memLine = ctx
       ? [ctx.memory, ctx.recall].filter(Boolean).join('\n\n')

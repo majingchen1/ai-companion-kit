@@ -57,6 +57,18 @@
     "typingMinIntervalMs": 45000,
     "typingProbability": 0.35
   },
+  "// 6.04": "=== 读链接：对方发网址 / 分享卡片时模型可以打开看（只抓网页本身、不跑 JS；内网和本机地址一律不碰）；maxChars 正文最多给模型看多少字；proxy 填 HTTP 代理（如 http://127.0.0.1:10808，或 env 读 HTTPS_PROXY），墙外网站才读得到，空着就直连 ===",
+  "webRead": {
+    "enabled": true,
+    "maxChars": 3000,
+    "proxy": ""
+  },
+  "// 6.05": "=== 表情包：dir 文件夹里放图（png/jpg/gif/webp），文件名就是含义，如 无语.gif；模型偶尔发一张，同一个会话发过后 cooldownMinutes 分钟内不再发 ===",
+  "stickers": {
+    "enabled": true,
+    "dir": "stickers",
+    "cooldownMinutes": 20
+  },
   "// 6.1": "=== 发送限频 + 熔断（防风控，别调高）===",
   "send": {
     "perMinute": 6,
